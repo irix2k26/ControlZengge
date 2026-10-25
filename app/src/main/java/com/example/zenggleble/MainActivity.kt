@@ -2,7 +2,10 @@ package com.example.zenggeble
 
 import android.Manifest
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.Button
@@ -127,6 +130,17 @@ class MainActivity : AppCompatActivity() {
             startForegroundService(it)
         } else {
             startService(it)
+        }
+        pedirIgnorarBateria()
+    }
+
+    // Muestra el aviso del sistema (una sola vez) para excluir la app del ahorro de batería
+    private fun pedirIgnorarBateria() {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            })
         }
     }
 }

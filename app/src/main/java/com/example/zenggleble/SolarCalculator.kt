@@ -1,11 +1,16 @@
 package com.example.zenggeble
 
+import java.util.TimeZone
 import kotlin.math.*
 
 object SolarCalculator {
     const val LAT = 25.60
     const val LON = -100.27
     const val TZ_HORAS = -6
+
+    // Zona fija UTC-6 (Monterrey, sin horario de verano). La app NO depende
+    // de la zona horaria configurada en el celular.
+    val ZONA: TimeZone = TimeZone.getTimeZone("GMT-06:00")
 
     fun minutosSol(diaDelAnio: Int, amanecer: Boolean): Int {
         val r = Math.PI / 180.0

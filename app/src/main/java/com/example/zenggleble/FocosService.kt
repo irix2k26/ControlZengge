@@ -7,15 +7,25 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.util.*
+import java.util.Calendar
 
 class FocosService : Service() {
 
     private lateinit var bleManager: ZenggeBleManager
     private val handler = Handler(Looper.getMainLooper())
+    private var wakeLock: PowerManager.WakeLock? = null
 
-    data class Foco(val nombre: String, val mac: String, val hastaAmanecer: Boolean, var aplicado: Int = -1)
+    class Foco(val nombre: String, val mac: String, val hastaAmanecer: Boolean) {
+        var aplicado = -1            // último estado confirmado (-1 = desconocido)
+        var ultimaConfirmacion = 0L  // elapsedRealtime de la última confirmación
+        var proximoIntento = 0L      // no reintentar antes de este momento
+        var fallosSeguidos = 0
+        var enProceso = false        // hay un comando en cola/en curso para este foco
+    }
 
     private val focos = listOf(
         Foco("Afuera1", "08:65:f0:c5:71:2c", hastaAmanecer = false), // atardecer -> 22:00
@@ -24,7 +34,11 @@ class FocosService : Service() {
 
     private val runnable = object : Runnable {
         override fun run() {
-            verificarHorarios()
+            try {
+                verificarHorarios()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error en verificarHorarios", e)
+            }
             handler.postDelayed(this, 15000) // Revisa cada 15 seg
         }
     }
@@ -33,11 +47,28 @@ class FocosService : Service() {
         super.onCreate()
         bleManager = ZenggeBleManager(this)
         iniciarNotificacionForeground()
+
+        // Mantiene la CPU despierta con la pantalla apagada; si no, los timers se congelan.
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ControlZengge:focos").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+
         handler.post(runnable)
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    override fun onDestroy() {
+        handler.removeCallbacks(runnable)
+        wakeLock?.let { if (it.isHeld) it.release() }
+        super.onDestroy()
+    }
+
     private fun verificarHorarios() {
-        val cal = Calendar.getInstance()
+        // Zona fija UTC-6: no depende de la zona horaria del celular
+        val cal = Calendar.getInstance(SolarCalculator.ZONA)
         val diaDelAnio = cal.get(Calendar.DAY_OF_YEAR)
         val minAhora = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
 
@@ -50,6 +81,7 @@ class FocosService : Service() {
         val horaApagado1 = 22 * 60 // 22:00
 
         val anochecido = minAhora >= (ocaso + offsetAtardecer)
+        val ahora = SystemClock.elapsedRealtime()
 
         focos.forEach { f ->
             val deseado = if (f.hastaAmanecer) {
@@ -57,11 +89,28 @@ class FocosService : Service() {
             } else {
                 anochecido && (minAhora < horaApagado1)
             }
-
             val estadoDeseadoInt = if (deseado) 1 else 0
-            if (f.aplicado != estadoDeseadoInt) {
+
+            val cambio = f.aplicado != estadoDeseadoInt
+            // Reafirma el estado cada tanto: si el foco se quedó sin luz y volvió
+            // encendido, el celular lo corrige solo.
+            val reafirmar = !cambio && (ahora - f.ultimaConfirmacion) >= REAFIRMAR_MS
+
+            if ((cambio || reafirmar) && !f.enProceso && ahora >= f.proximoIntento) {
+                f.enProceso = true
+                Log.d(TAG, "${f.nombre}: pedir ${if (deseado) "ON" else "OFF"} (min=$minAhora, ocaso=$ocaso, alba=$alba)")
                 bleManager.enviarComando(f.mac, deseado) { exito ->
-                    if (exito) f.aplicado = estadoDeseadoInt
+                    f.enProceso = false
+                    if (exito) {
+                        f.aplicado = estadoDeseadoInt
+                        f.ultimaConfirmacion = SystemClock.elapsedRealtime()
+                        f.fallosSeguidos = 0
+                    } else {
+                        f.fallosSeguidos++
+                        // Espera creciente: 20s, 40s, 80s, 160s, hasta 5 min
+                        val espera = minOf(20_000L * (1L shl minOf(f.fallosSeguidos - 1, 4)), 300_000L)
+                        f.proximoIntento = SystemClock.elapsedRealtime() + espera
+                    }
                 }
             }
         }
@@ -82,4 +131,9 @@ class FocosService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        private const val TAG = "FocosService"
+        private const val REAFIRMAR_MS = 30 * 60 * 1000L
+    }
 }
